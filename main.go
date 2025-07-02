@@ -496,42 +496,21 @@ func testWithPcapFile() {
 	// Create packet source
 	packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
 
-	// Load some test signatures for matching
-	testSignatures := []struct {
-		Label     string
-		Signature string
-		OS        string
-	}{
-		{
-			Label:     "s:unix:Linux:3.x",
-			Signature: "4:64:0:1460:65535,0:mss:df:0",
-			OS:        "Linux 3.x",
-		},
-		{
-			Label:     "s:unix:Linux:2.6.x",
-			Signature: "4:64:0:1460:5840,6:mss,nop,ws,sok,ts:df:0",
-			OS:        "Linux 2.6.x",
-		},
-		{
-			Label:     "s:win:Windows:XP",
-			Signature: "4:128:0:1460:65535,0:mss:df,id+:0",
-			OS:        "Windows XP",
-		},
+	// Load the p0f.fp database
+	parser := NewP0fParser()
+	db, err := parser.ParseFile("p0f.fp")
+	if err != nil {
+		fmt.Printf("❌ Error parsing p0f.fp: %v\n", err)
+		return
 	}
 
-	// Parse signatures
-	var signatures []*p0f.TCPSignature
-	for _, sig := range testSignatures {
-		if tcpSig, err := p0f.ParseTCPSignature(sig.Label, sig.Signature); err == nil {
-			signatures = append(signatures, tcpSig)
-			fmt.Printf("✅ Loaded signature: %s\n", sig.OS)
-		} else {
-			fmt.Printf("❌ Failed to load signature %s: %v\n", sig.OS, err)
-		}
-	}
+	fmt.Printf("✅ Loaded %d TCP signatures from p0f.fp database\n", len(db.TCPRequest))
 
-	if len(signatures) == 0 {
-		fmt.Println("❌ No signatures loaded, cannot proceed with matching")
+	// Create TCP signature engine for matching
+	engine := NewTCPSignatureEngine(db)
+
+	if len(db.TCPRequest) == 0 {
+		fmt.Println("❌ No TCP signatures found in database, cannot proceed with matching")
 		return
 	}
 
@@ -581,14 +560,35 @@ func testWithPcapFile() {
 				// Analyze quirks
 				analyzePacketQuirks(tcpSyn.Quirks, quirksStats)
 
-				// Try to match against signatures
-				for _, sig := range signatures {
-					var fuzzy bool
-					if sig.Match(pcapPacket, &fuzzy) {
-						matchedPackets++
-						fmt.Printf("  ✅ MATCH: %s (fuzzy: %t)\n", sig.Label, fuzzy)
-						break
-					}
+				// Create packet info for matching against database
+				var ttl int = 64 // Default
+				if ipLayer := packet.Layer(layers.LayerTypeIPv4); ipLayer != nil {
+					ip := ipLayer.(*layers.IPv4)
+					ttl = int(ip.TTL)
+				} else if ipLayer := packet.Layer(layers.LayerTypeIPv6); ipLayer != nil {
+					ip := ipLayer.(*layers.IPv6)
+					ttl = int(ip.HopLimit)
+				}
+
+				packetInfo := &TCPPacketInfo{
+					IPVersion:   4, // Assuming IPv4 for now
+					TTL:         ttl,
+					IPOptLen:    0,
+					MSS:         int(tcpSyn.MSS),
+					WindowSize:  int(tcp.Window),
+					WindowScale: int(tcpSyn.WScale),
+					TCPOptions:  extractTCPOptionsFromLayers(tcp.Options),
+					HasDF:       hasDFFlag(packet),
+					PayloadLen:  len(tcp.Payload),
+				}
+
+				// Try to match against p0f database using signature engine
+				matches := engine.MatchTCPPacket(packetInfo)
+				if len(matches) > 0 {
+					matchedPackets++
+					bestMatch := matches[0] // Take the highest scoring match
+					fmt.Printf("  ✅ MATCH: %s (Score: %d)\n", bestMatch.Signature.Label, bestMatch.Score)
+					fmt.Printf("    Signature: %s\n", bestMatch.Signature.Sig)
 				}
 
 				// Limit output for readability
@@ -868,4 +868,39 @@ func testP0fParser() {
 		}
 		fmt.Println()
 	}
+}
+
+// Helper function to extract TCP options from gopacket layers
+func extractTCPOptionsFromLayers(options []layers.TCPOption) []string {
+	var optionNames []string
+	for _, opt := range options {
+		switch opt.OptionType {
+		case layers.TCPOptionKindMSS:
+			optionNames = append(optionNames, "mss")
+		case layers.TCPOptionKindNop:
+			optionNames = append(optionNames, "nop")
+		case layers.TCPOptionKindWindowScale:
+			optionNames = append(optionNames, "ws")
+		case layers.TCPOptionKindSACKPermitted:
+			optionNames = append(optionNames, "sok")
+		case layers.TCPOptionKindSACK:
+			optionNames = append(optionNames, "sack")
+		case layers.TCPOptionKindTimestamps:
+			optionNames = append(optionNames, "ts")
+		case 0: // End of option list
+			optionNames = append(optionNames, "eol")
+		default:
+			optionNames = append(optionNames, fmt.Sprintf("opt%d", opt.OptionType))
+		}
+	}
+	return optionNames
+}
+
+// Helper function to check if DF flag is set
+func hasDFFlag(packet gopacket.Packet) bool {
+	if ipLayer := packet.Layer(layers.LayerTypeIPv4); ipLayer != nil {
+		ip := ipLayer.(*layers.IPv4)
+		return ip.Flags&layers.IPv4DontFragment != 0
+	}
+	return false
 }
