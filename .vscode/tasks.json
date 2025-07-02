@@ -1,0 +1,49 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Run P0F Tests",
+			"type": "shell",
+			"command": "go",
+			"args": [
+				"run",
+				"main.go",
+				"working_signatures.go",
+				"demo.go",
+				"summary.go"
+			],
+			"group": "build",
+			"isBackground": false,
+			"problemMatcher": [
+				"$go"
+			]
+		},
+		{
+			"label": "Build P0F Test",
+			"type": "shell",
+			"command": "go",
+			"args": [
+				"build",
+				"-o",
+				"p0f_test",
+				"."
+			],
+			"group": "build",
+			"isBackground": false,
+			"problemMatcher": [
+				"$go"
+			]
+		},
+		{
+			"label": "Clean Build",
+			"type": "shell",
+			"command": "rm",
+			"args": [
+				"-f",
+				"p0f_test"
+			],
+			"group": "build",
+			"isBackground": false
+		}
+	]
+}
