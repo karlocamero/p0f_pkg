@@ -54,8 +54,7 @@ func main() {
 	testWithPcapFile()
 
 	// Test 8: Test P0f Database Parser
-	testP0fParserFunction()
-	// Note: Full testP0fParser() function is in p0f_test.go
+	testP0fParser()
 
 	// Test 9: Enhanced pcap analysis with database - TODO: Implement
 	// testEnhancedPcapAnalysis()
@@ -646,14 +645,6 @@ func analyzePacketQuirks(quirks int, stats map[string]int) {
 	}
 }
 
-func testP0fParserFunction() {
-	fmt.Println("--- Test 7: P0f Database Parser ---")
-
-	// This test is handled in the p0f_test.go file
-	fmt.Println("✅ P0f parser test moved to testP0fParser() function")
-	fmt.Println()
-}
-
 func testComprehensiveP0fDatabase() {
 	fmt.Println("--- Test 8: Comprehensive P0f Database Analysis ---")
 
@@ -801,4 +792,80 @@ func testComprehensiveP0fDatabase() {
 
 	fmt.Println()
 	fmt.Println("✅ Comprehensive P0f database test completed!")
+}
+
+// testP0fParser demonstrates the p0f.fp parsing functionality
+func testP0fParser() {
+	fmt.Println("\n=== Testing P0f.fp Parser ===")
+
+	// Create parser and parse the database
+	parser := NewP0fParser()
+	db, err := parser.ParseFile("p0f.fp")
+	if err != nil {
+		log.Printf("Error parsing p0f.fp: %v", err)
+		return
+	}
+
+	fmt.Println("Successfully parsed p0f.fp database!")
+	fmt.Println()
+
+	// Print database statistics
+	db.PrintStats()
+	fmt.Println()
+
+	// Test search functionality
+	fmt.Println("=== Sample Signatures ===")
+
+	// Show some Linux TCP request signatures
+	linuxSigs := db.FindSignatureByPattern("tcp:request", "Linux")
+	if len(linuxSigs) > 0 {
+		fmt.Printf("Found %d Linux TCP request signatures:\n", len(linuxSigs))
+		for i, sig := range linuxSigs {
+			if i >= 3 { // Limit to first 3 for brevity
+				fmt.Printf("  ... and %d more\n", len(linuxSigs)-3)
+				break
+			}
+			fmt.Printf("  %s -> %s\n", sig.Label, sig.Sig)
+		}
+		fmt.Println()
+	}
+
+	// Show some Windows signatures
+	windowsSigs := db.FindSignatureByPattern("tcp:request", "Windows")
+	if len(windowsSigs) > 0 {
+		fmt.Printf("Found %d Windows TCP request signatures:\n", len(windowsSigs))
+		for i, sig := range windowsSigs {
+			if i >= 3 {
+				fmt.Printf("  ... and %d more\n", len(windowsSigs)-3)
+				break
+			}
+			fmt.Printf("  %s -> %s\n", sig.Label, sig.Sig)
+		}
+		fmt.Println()
+	}
+
+	// Test signature parsing
+	fmt.Println("=== TCP Signature Analysis ===")
+	if len(db.TCPRequest) > 0 {
+		testSig := db.TCPRequest[0]
+		fmt.Printf("Analyzing signature: %s\n", testSig.Sig)
+		parsed := ParseTCPSignatureBasic(testSig.Sig)
+		fmt.Printf("Parsed components:\n")
+		for key, value := range parsed {
+			fmt.Printf("  %s: %v\n", key, value)
+		}
+		fmt.Println()
+	}
+
+	// Show HTTP signatures if available
+	if len(db.HTTPRequest) > 0 {
+		fmt.Printf("Found %d HTTP request signatures (showing first 2):\n", len(db.HTTPRequest))
+		for i, sig := range db.HTTPRequest {
+			if i >= 2 {
+				break
+			}
+			fmt.Printf("  %s -> %s\n", sig.Label, sig.Sig)
+		}
+		fmt.Println()
+	}
 }
