@@ -31,42 +31,69 @@ func main() {
 	fmt.Println("=== P0F Package Testing Suite ===")
 	fmt.Println()
 
+	// Control flags for enabling/disabling specific tests
+	const (
+		enableParseTCPSignature     = true
+		enableMockPacketAndTCPSyn   = true
+		enableConstantsAndVariables = true
+		enableSignatureMatching     = true // Disabled
+		enableAdvancedTests         = true
+		enableWorkingSignatureDemo  = true
+		enablePcapTest              = true
+		enableP0fParser             = true
+		enableComprehensiveTest     = true
+	)
+
 	// Test 1: Parse TCP Signature
-	testParseTCPSignature()
+	if enableParseTCPSignature {
+		testParseTCPSignature()
+	}
 
 	// Test 2: Create Mock Packet and TCP SYN
-	testMockPacketAndTCPSyn()
+	if enableMockPacketAndTCPSyn {
+		testMockPacketAndTCPSyn()
+	}
 
 	// Test 3: Test Constants and Variables
-	testConstantsAndVariables()
+	if enableConstantsAndVariables {
+		testConstantsAndVariables()
+	}
 
 	// Test 4: Test Signature Matching
-	testSignatureMatching()
+	if enableSignatureMatching {
+		testSignatureMatching()
+	}
 
 	// Test 5: Run advanced tests
-	fmt.Println("=== Running Advanced Tests ===")
-	runAdvancedTests()
+	if enableAdvancedTests {
+		fmt.Println("=== Running Advanced Tests ===")
+		runAdvancedTests()
+	}
 
 	// Test 6: Run working signatures demo
-	fmt.Println()
-	runWorkingSignatureDemo()
+	if enableWorkingSignatureDemo {
+		fmt.Println()
+		runWorkingSignatureDemo()
+	}
 
-	// Test 7: Test with real pcap data
-	fmt.Println()
-	testWithPcapFile()
+	// Test 7: Test with real pcap data using classic algorithm
+	if enablePcapTest {
+		fmt.Println()
+		testWithPcapFileClassic()
+	}
 
 	// Test 8: Test P0f Database Parser
-	testP0fParser()
+	if enableP0fParser {
+		testP0fParser()
+	}
 
 	// Test 9: Enhanced pcap analysis with database - TODO: Implement
 	// testEnhancedPcapAnalysis()
 
 	// Test 10: Comprehensive P0f Database Test
-	testComprehensiveP0fDatabase()
-
-	// Test 11: Test with PCAP file using classic algorithm
-	fmt.Println()
-	testWithPcapFileClassic()
+	if enableComprehensiveTest {
+		testComprehensiveP0fDatabase()
+	}
 }
 
 func runAdvancedTests() {
@@ -484,106 +511,6 @@ func (p *PcapPacket) TCP() *layers.TCP {
 	return nil
 }
 
-func testWithPcapFile() {
-	fmt.Println("=== Testing with PCAP File ===")
-	fmt.Println("--- Analyzing gex_tcp_filter.pcap ---")
-
-	// Open the pcap file
-	handle, err := pcap.OpenOffline("gex_tcp_filter2.pcap")
-	if err != nil {
-		fmt.Printf("❌ Error opening pcap file: %v\n", err)
-		return
-	}
-	defer handle.Close()
-
-	// Create packet source
-	packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
-
-	// Load the p0f.fp database
-	parser := NewP0fParser()
-	db, err := parser.ParseFile("p0f.fp")
-	if err != nil {
-		fmt.Printf("❌ Error parsing p0f.fp: %v\n", err)
-		return
-	}
-
-	fmt.Printf("✅ Loaded %d TCP signatures from p0f.fp database\n", len(db.TCPRequest))
-
-	if len(db.TCPRequest) == 0 {
-		fmt.Println("❌ No TCP signatures found in database, cannot proceed with matching")
-		return
-	}
-
-	fmt.Printf("\nAnalyzing packets from pcap file with classic algorithm...\n")
-
-	packetCount := 0
-	tcpSynCount := 0
-	matchedPackets := 0
-	quirksStats := make(map[string]int)
-
-	// Process packets
-	for packet := range packetSource.Packets() {
-		packetCount++
-
-		// Only process TCP packets
-		if tcpLayer := packet.Layer(layers.LayerTypeTCP); tcpLayer != nil {
-			tcp := tcpLayer.(*layers.TCP)
-
-			// Only analyze SYN packets (for fingerprinting)
-			if tcp.SYN && !tcp.ACK {
-				tcpSynCount++
-
-				// Extract TCP SYN characteristics using p0f library
-				tcpSyn := p0f.NewTCPSyn(&PcapPacket{packet: packet})
-
-				fmt.Printf("\nTCP SYN packet #%d: %s:%d -> %s:%d\n",
-					tcpSynCount,
-					packet.NetworkLayer().NetworkFlow().Src(),
-					tcp.SrcPort,
-					packet.NetworkLayer().NetworkFlow().Dst(),
-					tcp.DstPort)
-
-				fmt.Printf("  Quirks: %d (0b%b)\n", tcpSyn.Quirks, tcpSyn.Quirks)
-				fmt.Printf("  MSS: %d, Window: %d, WScale: %d\n", tcpSyn.MSS, tcp.Window, tcpSyn.WScale)
-
-				// Convert packet to classic signature format for matching
-				packetSig := convertPacketToClassicSignature(packet, &tcpSyn)
-
-				// Count quirks
-				if hasDFFlag(packet) {
-					quirksStats["DF flag used"]++
-				}
-
-				// Try to match against signatures using classic p0f algorithm
-				matchResult := classicTCPMatch(packetSig, db.TCPRequest)
-				if matchResult != nil {
-					matchedPackets++
-					fmt.Printf("  ✅ CLASSIC MATCH: %s\n", matchResult.Signature.Label)
-					fmt.Printf("    Signature: %s\n", matchResult.Signature.Sig)
-					fmt.Printf("    Match Type: %s\n", getMatchTypeString(matchResult))
-					fmt.Printf("    TTL Distance: %d\n", matchResult.TTLDistance)
-
-					// Analyze quirks for the matched signature
-					analyzePacketQuirks(tcpSyn.Quirks, quirksStats)
-				} else {
-					fmt.Printf("  ❌ No classic signature matches found\n")
-				}
-			}
-		}
-	}
-
-	// Print summary statistics
-	fmt.Printf("\n--- Classic PCAP Analysis Summary ---\n")
-	fmt.Printf("Total packets processed: %d\n", packetCount)
-	fmt.Printf("TCP SYN packets found: %d\n", tcpSynCount)
-	fmt.Printf("Classic signatures matched: %d (%.1f%%)\n", matchedPackets, float64(matchedPackets)/float64(tcpSynCount)*100)
-
-	fmt.Printf("\nQuirks statistics:\n")
-	for quirk, count := range quirksStats {
-		fmt.Printf("  %s: %d packets\n", quirk, count)
-	}
-}
-
 func analyzePacketQuirks(quirks int, stats map[string]int) {
 	quirkMap := map[string]int{
 		"ECN supported":               p0f.TCPQuirkECN,
@@ -830,15 +757,6 @@ func testP0fParser() {
 	}
 }
 
-// Helper function to check if DF flag is set
-func hasDFFlag(packet gopacket.Packet) bool {
-	if ipLayer := packet.Layer(layers.LayerTypeIPv4); ipLayer != nil {
-		ip := ipLayer.(*layers.IPv4)
-		return ip.Flags&layers.IPv4DontFragment != 0
-	}
-	return false
-}
-
 // Helper function to extract TTL value from packet
 func extractTTL(packet gopacket.Packet) int {
 	if ipLayer := packet.Layer(layers.LayerTypeIPv4); ipLayer != nil {
@@ -857,7 +775,7 @@ func testWithPcapFileClassic() {
 	fmt.Println("--- Analyzing gex_tcp_filter2.pcap with Classic Matching ---")
 
 	// Open the pcap file
-	handle, err := pcap.OpenOffline("gex_tcp_filter2.pcap")
+	handle, err := pcap.OpenOffline("ubuntu_test.pcapng")
 	if err != nil {
 		fmt.Printf("❌ Error opening pcap file: %v\n", err)
 		return
