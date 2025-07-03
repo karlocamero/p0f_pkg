@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 )
 
@@ -433,9 +434,7 @@ func (engine *TCPSignatureEngine) ParseTCPSignature(sig P0fSignature) (*ParsedTC
 		parsed.TTL = -1 // Wildcard
 	} else {
 		// Handle TTL with bad flag (ending with -)
-		if strings.HasSuffix(ttlStr, "-") {
-			ttlStr = ttlStr[:len(ttlStr)-1]
-		}
+		ttlStr = strings.TrimSuffix(ttlStr, "-")
 		ttl := 0
 		fmt.Sscanf(ttlStr, "%d", &ttl)
 		parsed.TTL = ttl
@@ -486,34 +485,31 @@ func (engine *TCPSignatureEngine) ParseTCPSignature(sig P0fSignature) (*ParsedTC
 }
 
 // MatchTCPPacket attempts to match a TCP packet against the signature database
-func (engine *TCPSignatureEngine) MatchTCPPacket(packet *TCPPacketInfo) []SignatureMatch {
+func (engine *TCPSignatureEngine) MatchTCPPacket(packetInfo TCPPacketInfo) []SignatureMatch {
 	var matches []SignatureMatch
 
-	// Try to match against all TCP request signatures
 	for _, sig := range engine.db.TCPRequest {
+		// Add error handling for signature parsing
 		parsed, err := engine.ParseTCPSignature(sig)
 		if err != nil {
-			continue // Skip malformed signatures
+			// Log the problematic signature for debugging
+			fmt.Printf("Warning: Failed to parse signature '%s': %v\n", sig.Sig, err)
+			continue
 		}
 
-		score := engine.calculateMatchScore(packet, parsed)
-		if score > 0 {
+		score := engine.calculateMatchScore(&packetInfo, parsed)
+		if score > 50 { // Only consider matches with >50% confidence
 			matches = append(matches, SignatureMatch{
 				Signature: sig,
 				Score:     score,
-				Fuzzy:     score < 100, // Perfect match = 100, anything less is fuzzy
 			})
 		}
 	}
 
-	// Sort matches by score (highest first)
-	for i := 0; i < len(matches)-1; i++ {
-		for j := i + 1; j < len(matches); j++ {
-			if matches[i].Score < matches[j].Score {
-				matches[i], matches[j] = matches[j], matches[i]
-			}
-		}
-	}
+	// Sort by score (highest first)
+	sort.Slice(matches, func(i, j int) bool {
+		return matches[i].Score > matches[j].Score
+	})
 
 	return matches
 }

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"strings"
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
@@ -441,7 +442,7 @@ func testSignatureMatching() {
 	}
 
 	// Test signature matching using the engine
-	matches := engine.MatchTCPPacket(mockPacket)
+	matches := engine.MatchTCPPacket(*mockPacket)
 
 	fmt.Printf("Found %d signature matches for mock packet\n", len(matches))
 
@@ -533,68 +534,46 @@ func testWithPcapFile() {
 			if tcp.SYN && !tcp.ACK {
 				tcpSynCount++
 
-				// Wrap packet for p0f interface
-				pcapPacket := &PcapPacket{packet: packet}
-
-				// Extract TCP SYN characteristics
-				tcpSyn := p0f.NewTCPSyn(pcapPacket)
-
-				// Get IP layer info for display
-				var srcIP, dstIP string
-				if ipLayer := packet.Layer(layers.LayerTypeIPv4); ipLayer != nil {
-					ip := ipLayer.(*layers.IPv4)
-					srcIP = ip.SrcIP.String()
-					dstIP = ip.DstIP.String()
-				} else if ipLayer := packet.Layer(layers.LayerTypeIPv6); ipLayer != nil {
-					ip := ipLayer.(*layers.IPv6)
-					srcIP = ip.SrcIP.String()
-					dstIP = ip.DstIP.String()
+				// Extract packet information
+				packetInfo := TCPPacketInfo{
+					TTL:        extractTTL(packet),
+					WindowSize: int(tcp.Window),
+					MSS:        extractMSS(packet),
+					TCPOptions: extractTCPOptionsFromLayers(tcp.Options),
+					HasDF:      hasDFFlag(packet),
 				}
 
 				fmt.Printf("\nTCP SYN packet #%d: %s:%d -> %s:%d\n",
-					tcpSynCount, srcIP, tcp.SrcPort, dstIP, tcp.DstPort)
-				fmt.Printf("  Quirks: %d (0b%b)\n", tcpSyn.Quirks, tcpSyn.Quirks)
-				fmt.Printf("  MSS: %d, Window: %d, WScale: %d\n",
-					tcpSyn.MSS, tcp.Window, tcpSyn.WScale)
+					tcpSynCount,
+					packet.NetworkLayer().NetworkFlow().Src(),
+					tcp.SrcPort,
+					packet.NetworkLayer().NetworkFlow().Dst(),
+					tcp.DstPort)
 
-				// Analyze quirks
-				analyzePacketQuirks(tcpSyn.Quirks, quirksStats)
+				fmt.Printf("  Quirks: %d (%s)\n", len(packetInfo.TCPOptions), formatTCPOptions(packetInfo.TCPOptions))
+				fmt.Printf("  MSS: %d, Window: %d, WScale: %d\n", packetInfo.MSS, packetInfo.WindowSize, 8)
 
-				// Create packet info for matching against database
-				var ttl int = 64 // Default
-				if ipLayer := packet.Layer(layers.LayerTypeIPv4); ipLayer != nil {
-					ip := ipLayer.(*layers.IPv4)
-					ttl = int(ip.TTL)
-				} else if ipLayer := packet.Layer(layers.LayerTypeIPv6); ipLayer != nil {
-					ip := ipLayer.(*layers.IPv6)
-					ttl = int(ip.HopLimit)
+				// Count quirks
+				if packetInfo.HasDF {
+					quirksStats["DF flag used"]++
 				}
 
-				packetInfo := &TCPPacketInfo{
-					IPVersion:   4, // Assuming IPv4 for now
-					TTL:         ttl,
-					IPOptLen:    0,
-					MSS:         int(tcpSyn.MSS),
-					WindowSize:  int(tcp.Window),
-					WindowScale: int(tcpSyn.WScale),
-					TCPOptions:  extractTCPOptionsFromLayers(tcp.Options),
-					HasDF:       hasDFFlag(packet),
-					PayloadLen:  len(tcp.Payload),
-				}
-
-				// Try to match against p0f database using signature engine
+				// Try to match against signatures with better error handling
 				matches := engine.MatchTCPPacket(packetInfo)
 				if len(matches) > 0 {
 					matchedPackets++
-					bestMatch := matches[0] // Take the highest scoring match
+					bestMatch := matches[0]
 					fmt.Printf("  ✅ MATCH: %s (Score: %d)\n", bestMatch.Signature.Label, bestMatch.Score)
 					fmt.Printf("    Signature: %s\n", bestMatch.Signature.Sig)
-				}
 
-				// Limit output for readability
-				if tcpSynCount >= 10 {
-					fmt.Printf("\n... (limiting output to first 10 SYN packets)\n")
-					break
+					// Count active quirks
+					for _, quirk := range bestMatch.Signature.Sig {
+						if strings.Contains(string(quirk), "df") {
+							quirksStats["DF flag used (Non-zero ID when DF set)"]++
+						}
+					}
+				} else {
+					fmt.Printf("  ❌ No signature matches found\n")
 				}
 			}
 		}
@@ -604,21 +583,12 @@ func testWithPcapFile() {
 	fmt.Printf("\n--- PCAP Analysis Summary ---\n")
 	fmt.Printf("Total packets processed: %d\n", packetCount)
 	fmt.Printf("TCP SYN packets found: %d\n", tcpSynCount)
-	fmt.Printf("Signatures matched: %d\n", matchedPackets)
+	fmt.Printf("Packets matched: %d (%.1f%%)\n", matchedPackets, float64(matchedPackets)/float64(tcpSynCount)*100)
 
-	if len(quirksStats) > 0 {
-		fmt.Printf("\nQuirks detected across all packets:\n")
-		for quirk, count := range quirksStats {
-			fmt.Printf("  %s: %d packets\n", quirk, count)
-		}
+	fmt.Printf("\nQuirks statistics:\n")
+	for quirk, count := range quirksStats {
+		fmt.Printf("  %s: %d packets\n", quirk, count)
 	}
-
-	if tcpSynCount > 0 {
-		fmt.Printf("\nMatch rate: %.1f%% of SYN packets matched a signature\n",
-			float64(matchedPackets)/float64(tcpSynCount)*100)
-	}
-
-	fmt.Println()
 }
 
 func analyzePacketQuirks(quirks int, stats map[string]int) {
@@ -737,7 +707,7 @@ func testComprehensiveP0fDatabase() {
 
 	for _, test := range testPackets {
 		fmt.Printf("Testing: %s\n", test.Name)
-		matches := engine.MatchTCPPacket(test.Packet)
+		matches := engine.MatchTCPPacket(*test.Packet)
 
 		if len(matches) > 0 {
 			fmt.Printf("  ✅ Found %d signature matches\n", len(matches))
@@ -903,4 +873,34 @@ func hasDFFlag(packet gopacket.Packet) bool {
 		return ip.Flags&layers.IPv4DontFragment != 0
 	}
 	return false
+}
+
+// Helper function to extract TTL value from packet
+func extractTTL(packet gopacket.Packet) int {
+	if ipLayer := packet.Layer(layers.LayerTypeIPv4); ipLayer != nil {
+		ip := ipLayer.(*layers.IPv4)
+		return int(ip.TTL)
+	} else if ipLayer := packet.Layer(layers.LayerTypeIPv6); ipLayer != nil {
+		ip := ipLayer.(*layers.IPv6)
+		return int(ip.HopLimit)
+	}
+	return 64 // Default TTL
+}
+
+// Helper function to extract MSS value from packet
+func extractMSS(packet gopacket.Packet) int {
+	if tcpLayer := packet.Layer(layers.LayerTypeTCP); tcpLayer != nil {
+		tcp := tcpLayer.(*layers.TCP)
+		for _, opt := range tcp.Options {
+			if opt.OptionType == layers.TCPOptionKindMSS {
+				return int(opt.OptionData[0])<<8 + int(opt.OptionData[1])
+			}
+		}
+	}
+	return 1460 // Default MSS
+}
+
+// Helper function to format TCP options for display
+func formatTCPOptions(options []string) string {
+	return strings.Join(options, ", ")
 }
