@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"strconv"
 	"strings"
 
 	"github.com/google/gopacket"
@@ -62,6 +63,10 @@ func main() {
 
 	// Test 10: Comprehensive P0f Database Test
 	testComprehensiveP0fDatabase()
+
+	// Test 11: Test with PCAP file using classic algorithm
+	fmt.Println()
+	testWithPcapFileClassic()
 }
 
 func runAdvancedTests() {
@@ -412,9 +417,6 @@ func testSignatureMatching() {
 		return
 	}
 
-	// Create TCP signature engine
-	engine := NewTCPSignatureEngine(db)
-
 	fmt.Printf("Loaded %d TCP request signatures from p0f.fp\n", len(db.TCPRequest))
 
 	if len(db.TCPRequest) == 0 {
@@ -428,32 +430,32 @@ func testSignatureMatching() {
 		fmt.Printf("Testing with signature: %s -> %s\n", testSig.Label, testSig.Sig)
 	}
 
-	// Create a mock TCP packet to test matching
-	mockPacket := &TCPPacketInfo{
-		IPVersion:   4,
-		TTL:         64,
-		IPOptLen:    0,
-		MSS:         1460,
-		WindowSize:  65535,
-		WindowScale: 0,
-		TCPOptions:  []string{"mss", "nop", "ws"},
-		HasDF:       true,
-		PayloadLen:  0,
+	// Create a mock TCP packet for classic matching
+	mockPacketSig := &ClassicTCPSignature{
+		IPVersion:    4,
+		TTL:          64,
+		IPOptLen:     0,
+		MSS:          1460,
+		WindowSize:   65535,
+		WindowType:   1, // WIN_TYPE_NORMAL
+		WindowScale:  0,
+		TCPOptions:   []int{2, 1, 3}, // mss, nop, ws
+		Quirks:       p0f.TCPQuirkDF,
+		PayloadClass: 0,
+		OptHash:      calculateOptionHash([]int{2, 1, 3}),
 	}
 
-	// Test signature matching using the engine
-	matches := engine.MatchTCPPacket(*mockPacket)
+	// Test signature matching using classic algorithm
+	matchResult := classicTCPMatch(mockPacketSig, db.TCPRequest)
 
-	fmt.Printf("Found %d signature matches for mock packet\n", len(matches))
-
-	// Show top 3 matches
-	for i, match := range matches {
-		if i >= 3 {
-			fmt.Printf("... and %d more matches\n", len(matches)-3)
-			break
-		}
-		fmt.Printf("  Match %d: %s (Score: %d)\n", i+1, match.Signature.Label, match.Score)
-		fmt.Printf("    Signature: %s\n", match.Signature.Sig)
+	if matchResult != nil {
+		fmt.Printf("Found classic signature match for mock packet\n")
+		fmt.Printf("  ✅ CLASSIC MATCH: %s\n", matchResult.Signature.Label)
+		fmt.Printf("    Signature: %s\n", matchResult.Signature.Sig)
+		fmt.Printf("    Match Type: %s\n", getMatchTypeString(matchResult))
+		fmt.Printf("    TTL Distance: %d\n", matchResult.TTLDistance)
+	} else {
+		fmt.Printf("No classic signature matches found for mock packet\n")
 	}
 	fmt.Println()
 }
@@ -487,7 +489,7 @@ func testWithPcapFile() {
 	fmt.Println("--- Analyzing gex_tcp_filter.pcap ---")
 
 	// Open the pcap file
-	handle, err := pcap.OpenOffline("gex_tcp_filter.pcap")
+	handle, err := pcap.OpenOffline("gex_tcp_filter2.pcap")
 	if err != nil {
 		fmt.Printf("❌ Error opening pcap file: %v\n", err)
 		return
@@ -507,15 +509,12 @@ func testWithPcapFile() {
 
 	fmt.Printf("✅ Loaded %d TCP signatures from p0f.fp database\n", len(db.TCPRequest))
 
-	// Create TCP signature engine for matching
-	engine := NewTCPSignatureEngine(db)
-
 	if len(db.TCPRequest) == 0 {
 		fmt.Println("❌ No TCP signatures found in database, cannot proceed with matching")
 		return
 	}
 
-	fmt.Printf("\nAnalyzing packets from pcap file...\n")
+	fmt.Printf("\nAnalyzing packets from pcap file with classic algorithm...\n")
 
 	packetCount := 0
 	tcpSynCount := 0
@@ -534,14 +533,8 @@ func testWithPcapFile() {
 			if tcp.SYN && !tcp.ACK {
 				tcpSynCount++
 
-				// Extract packet information
-				packetInfo := TCPPacketInfo{
-					TTL:        extractTTL(packet),
-					WindowSize: int(tcp.Window),
-					MSS:        extractMSS(packet),
-					TCPOptions: extractTCPOptionsFromLayers(tcp.Options),
-					HasDF:      hasDFFlag(packet),
-				}
+				// Extract TCP SYN characteristics using p0f library
+				tcpSyn := p0f.NewTCPSyn(&PcapPacket{packet: packet})
 
 				fmt.Printf("\nTCP SYN packet #%d: %s:%d -> %s:%d\n",
 					tcpSynCount,
@@ -550,40 +543,40 @@ func testWithPcapFile() {
 					packet.NetworkLayer().NetworkFlow().Dst(),
 					tcp.DstPort)
 
-				fmt.Printf("  Quirks: %d (%s)\n", len(packetInfo.TCPOptions), formatTCPOptions(packetInfo.TCPOptions))
-				fmt.Printf("  MSS: %d, Window: %d, WScale: %d\n", packetInfo.MSS, packetInfo.WindowSize, 8)
+				fmt.Printf("  Quirks: %d (0b%b)\n", tcpSyn.Quirks, tcpSyn.Quirks)
+				fmt.Printf("  MSS: %d, Window: %d, WScale: %d\n", tcpSyn.MSS, tcp.Window, tcpSyn.WScale)
+
+				// Convert packet to classic signature format for matching
+				packetSig := convertPacketToClassicSignature(packet, &tcpSyn)
 
 				// Count quirks
-				if packetInfo.HasDF {
+				if hasDFFlag(packet) {
 					quirksStats["DF flag used"]++
 				}
 
-				// Try to match against signatures with better error handling
-				matches := engine.MatchTCPPacket(packetInfo)
-				if len(matches) > 0 {
+				// Try to match against signatures using classic p0f algorithm
+				matchResult := classicTCPMatch(packetSig, db.TCPRequest)
+				if matchResult != nil {
 					matchedPackets++
-					bestMatch := matches[0]
-					fmt.Printf("  ✅ MATCH: %s (Score: %d)\n", bestMatch.Signature.Label, bestMatch.Score)
-					fmt.Printf("    Signature: %s\n", bestMatch.Signature.Sig)
+					fmt.Printf("  ✅ CLASSIC MATCH: %s\n", matchResult.Signature.Label)
+					fmt.Printf("    Signature: %s\n", matchResult.Signature.Sig)
+					fmt.Printf("    Match Type: %s\n", getMatchTypeString(matchResult))
+					fmt.Printf("    TTL Distance: %d\n", matchResult.TTLDistance)
 
-					// Count active quirks
-					for _, quirk := range bestMatch.Signature.Sig {
-						if strings.Contains(string(quirk), "df") {
-							quirksStats["DF flag used (Non-zero ID when DF set)"]++
-						}
-					}
+					// Analyze quirks for the matched signature
+					analyzePacketQuirks(tcpSyn.Quirks, quirksStats)
 				} else {
-					fmt.Printf("  ❌ No signature matches found\n")
+					fmt.Printf("  ❌ No classic signature matches found\n")
 				}
 			}
 		}
 	}
 
 	// Print summary statistics
-	fmt.Printf("\n--- PCAP Analysis Summary ---\n")
+	fmt.Printf("\n--- Classic PCAP Analysis Summary ---\n")
 	fmt.Printf("Total packets processed: %d\n", packetCount)
 	fmt.Printf("TCP SYN packets found: %d\n", tcpSynCount)
-	fmt.Printf("Packets matched: %d (%.1f%%)\n", matchedPackets, float64(matchedPackets)/float64(tcpSynCount)*100)
+	fmt.Printf("Classic signatures matched: %d (%.1f%%)\n", matchedPackets, float64(matchedPackets)/float64(tcpSynCount)*100)
 
 	fmt.Printf("\nQuirks statistics:\n")
 	for quirk, count := range quirksStats {
@@ -653,76 +646,73 @@ func testComprehensiveP0fDatabase() {
 	// Test signature matching with different packet types
 	fmt.Println("=== Signature Matching Tests ===")
 
-	engine := NewTCPSignatureEngine(db)
-
-	// Test different packet scenarios
+	// Test different packet scenarios using classic matching
 	testPackets := []struct {
 		Name   string
-		Packet *TCPPacketInfo
+		Packet *ClassicTCPSignature
 	}{
 		{
 			Name: "Typical Linux packet",
-			Packet: &TCPPacketInfo{
-				IPVersion:   4,
-				TTL:         64,
-				IPOptLen:    0,
-				MSS:         1460,
-				WindowSize:  65535,
-				WindowScale: 7,
-				TCPOptions:  []string{"mss", "sok", "ts", "nop", "ws"},
-				HasDF:       true,
-				PayloadLen:  0,
+			Packet: &ClassicTCPSignature{
+				IPVersion:    4,
+				TTL:          64,
+				IPOptLen:     0,
+				MSS:          1460,
+				WindowSize:   65535,
+				WindowType:   1, // WIN_TYPE_NORMAL
+				WindowScale:  7,
+				TCPOptions:   []int{2, 4, 8, 1, 3}, // mss, sok, ts, nop, ws
+				Quirks:       p0f.TCPQuirkDF,
+				PayloadClass: 0,
+				OptHash:      calculateOptionHash([]int{2, 4, 8, 1, 3}),
 			},
 		},
 		{
 			Name: "Typical Windows packet",
-			Packet: &TCPPacketInfo{
-				IPVersion:   4,
-				TTL:         128,
-				IPOptLen:    0,
-				MSS:         1460,
-				WindowSize:  65535,
-				WindowScale: 0,
-				TCPOptions:  []string{"mss"},
-				HasDF:       true,
-				HasIDPlus:   true,
-				PayloadLen:  0,
+			Packet: &ClassicTCPSignature{
+				IPVersion:    4,
+				TTL:          128,
+				IPOptLen:     0,
+				MSS:          1460,
+				WindowSize:   65535,
+				WindowType:   1, // WIN_TYPE_NORMAL
+				WindowScale:  0,
+				TCPOptions:   []int{2}, // mss only
+				Quirks:       p0f.TCPQuirkDF | p0f.TCPQuirkNZID,
+				PayloadClass: 0,
+				OptHash:      calculateOptionHash([]int{2}),
 			},
 		},
 		{
 			Name: "High TTL packet",
-			Packet: &TCPPacketInfo{
-				IPVersion:   4,
-				TTL:         255,
-				IPOptLen:    0,
-				MSS:         1460,
-				WindowSize:  32768,
-				WindowScale: 3,
-				TCPOptions:  []string{"mss", "nop", "ws"},
-				HasDF:       false,
-				PayloadLen:  0,
+			Packet: &ClassicTCPSignature{
+				IPVersion:    4,
+				TTL:          255,
+				IPOptLen:     0,
+				MSS:          1460,
+				WindowSize:   32768,
+				WindowType:   1, // WIN_TYPE_NORMAL
+				WindowScale:  3,
+				TCPOptions:   []int{2, 1, 3}, // mss, nop, ws
+				Quirks:       0,              // No DF flag
+				PayloadClass: 0,
+				OptHash:      calculateOptionHash([]int{2, 1, 3}),
 			},
 		},
 	}
 
 	for _, test := range testPackets {
 		fmt.Printf("Testing: %s\n", test.Name)
-		matches := engine.MatchTCPPacket(*test.Packet)
+		matchResult := classicTCPMatch(test.Packet, db.TCPRequest)
 
-		if len(matches) > 0 {
-			fmt.Printf("  ✅ Found %d signature matches\n", len(matches))
-
-			// Show top 3 matches
-			for i, match := range matches {
-				if i >= 3 {
-					fmt.Printf("  ... and %d more matches\n", len(matches)-3)
-					break
-				}
-				fmt.Printf("    Match %d: %s\n", i+1, match.Signature.Label)
-				fmt.Printf("      Signature: %s\n", match.Signature.Sig)
-			}
+		if matchResult != nil {
+			fmt.Printf("  ✅ Found classic signature match\n")
+			fmt.Printf("    Match: %s\n", matchResult.Signature.Label)
+			fmt.Printf("      Signature: %s\n", matchResult.Signature.Sig)
+			fmt.Printf("      Match Type: %s\n", getMatchTypeString(matchResult))
+			fmt.Printf("      TTL Distance: %d\n", matchResult.TTLDistance)
 		} else {
-			fmt.Printf("  ❌ No signature matches found\n")
+			fmt.Printf("  ❌ No classic signature matches found\n")
 		}
 		fmt.Println()
 	}
@@ -840,32 +830,6 @@ func testP0fParser() {
 	}
 }
 
-// Helper function to extract TCP options from gopacket layers
-func extractTCPOptionsFromLayers(options []layers.TCPOption) []string {
-	var optionNames []string
-	for _, opt := range options {
-		switch opt.OptionType {
-		case layers.TCPOptionKindMSS:
-			optionNames = append(optionNames, "mss")
-		case layers.TCPOptionKindNop:
-			optionNames = append(optionNames, "nop")
-		case layers.TCPOptionKindWindowScale:
-			optionNames = append(optionNames, "ws")
-		case layers.TCPOptionKindSACKPermitted:
-			optionNames = append(optionNames, "sok")
-		case layers.TCPOptionKindSACK:
-			optionNames = append(optionNames, "sack")
-		case layers.TCPOptionKindTimestamps:
-			optionNames = append(optionNames, "ts")
-		case 0: // End of option list
-			optionNames = append(optionNames, "eol")
-		default:
-			optionNames = append(optionNames, fmt.Sprintf("opt%d", opt.OptionType))
-		}
-	}
-	return optionNames
-}
-
 // Helper function to check if DF flag is set
 func hasDFFlag(packet gopacket.Packet) bool {
 	if ipLayer := packet.Layer(layers.LayerTypeIPv4); ipLayer != nil {
@@ -887,20 +851,597 @@ func extractTTL(packet gopacket.Packet) int {
 	return 64 // Default TTL
 }
 
-// Helper function to extract MSS value from packet
-func extractMSS(packet gopacket.Packet) int {
-	if tcpLayer := packet.Layer(layers.LayerTypeTCP); tcpLayer != nil {
-		tcp := tcpLayer.(*layers.TCP)
-		for _, opt := range tcp.Options {
-			if opt.OptionType == layers.TCPOptionKindMSS {
-				return int(opt.OptionData[0])<<8 + int(opt.OptionData[1])
+// testWithPcapFileClassic implements TCP signature matching based on the original p0f-3.09b algorithm
+func testWithPcapFileClassic() {
+	fmt.Println("=== Testing with PCAP File (Classic P0F Algorithm) ===")
+	fmt.Println("--- Analyzing gex_tcp_filter2.pcap with Classic Matching ---")
+
+	// Open the pcap file
+	handle, err := pcap.OpenOffline("gex_tcp_filter2.pcap")
+	if err != nil {
+		fmt.Printf("❌ Error opening pcap file: %v\n", err)
+		return
+	}
+	defer handle.Close()
+
+	// Create packet source
+	packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
+
+	// Load the p0f.fp database
+	parser := NewP0fParser()
+	db, err := parser.ParseFile("p0f.fp")
+	if err != nil {
+		fmt.Printf("❌ Error parsing p0f.fp: %v\n", err)
+		return
+	}
+
+	fmt.Printf("✅ Loaded %d TCP signatures from p0f.fp database\n", len(db.TCPRequest))
+
+	if len(db.TCPRequest) == 0 {
+		fmt.Println("❌ No TCP signatures found in database, cannot proceed with matching")
+		return
+	}
+
+	fmt.Printf("\nAnalyzing packets with classic p0f algorithm...\n")
+
+	packetCount := 0
+	tcpSynCount := 0
+	matchedPackets := 0
+	fuzzyMatches := 0
+	exactMatches := 0
+	quirksStats := make(map[string]int)
+
+	// Process packets
+	for packet := range packetSource.Packets() {
+		packetCount++
+
+		// Only process TCP packets
+		if tcpLayer := packet.Layer(layers.LayerTypeTCP); tcpLayer != nil {
+			tcp := tcpLayer.(*layers.TCP)
+
+			// Only analyze SYN packets (for fingerprinting)
+			if tcp.SYN && !tcp.ACK {
+				tcpSynCount++
+
+				// Extract TCP SYN characteristics using p0f library
+				tcpSyn := p0f.NewTCPSyn(&PcapPacket{packet: packet})
+
+				// Get IP layer info for display
+				var srcIP, dstIP string
+				if ipLayer := packet.Layer(layers.LayerTypeIPv4); ipLayer != nil {
+					ip := ipLayer.(*layers.IPv4)
+					srcIP = ip.SrcIP.String()
+					dstIP = ip.DstIP.String()
+				} else if ipLayer := packet.Layer(layers.LayerTypeIPv6); ipLayer != nil {
+					ip := ipLayer.(*layers.IPv6)
+					srcIP = ip.SrcIP.String()
+					dstIP = ip.DstIP.String()
+				}
+
+				fmt.Printf("\nTCP SYN packet #%d: %s:%d -> %s:%d\n",
+					tcpSynCount, srcIP, tcp.SrcPort, dstIP, tcp.DstPort)
+				fmt.Printf("  Quirks: %d (0b%b)\n", tcpSyn.Quirks, tcpSyn.Quirks)
+				fmt.Printf("  MSS: %d, Window: %d, WScale: %d\n",
+					tcpSyn.MSS, tcp.Window, tcpSyn.WScale)
+
+				// Convert packet to our internal format for classic matching
+				packetSig := convertPacketToClassicSignature(packet, &tcpSyn)
+
+				// Try to match against signatures using classic p0f algorithm
+				matchResult := classicTCPMatch(packetSig, db.TCPRequest)
+				if matchResult != nil {
+					matchedPackets++
+					if matchResult.Fuzzy {
+						fuzzyMatches++
+					} else {
+						exactMatches++
+					}
+
+					fmt.Printf("  ✅ CLASSIC MATCH: %s\n", matchResult.Signature.Label)
+					fmt.Printf("    Signature: %s\n", matchResult.Signature.Sig)
+					fmt.Printf("    Match Type: %s\n", getMatchTypeString(matchResult))
+					fmt.Printf("    TTL Distance: %d\n", matchResult.TTLDistance)
+
+					// Analyze quirks for the matched signature
+					analyzePacketQuirks(tcpSyn.Quirks, quirksStats)
+				} else {
+					fmt.Printf("  ❌ No classic signature matches found\n")
+				}
+
+				// Limit output for readability
+				if tcpSynCount >= 10 {
+					fmt.Printf("\n... (limiting output to first 10 SYN packets)\n")
+					break
+				}
 			}
 		}
 	}
-	return 1460 // Default MSS
+
+	// Print summary statistics
+	fmt.Printf("\n--- Classic P0F Analysis Summary ---\n")
+	fmt.Printf("Total packets processed: %d\n", packetCount)
+	fmt.Printf("TCP SYN packets found: %d\n", tcpSynCount)
+	fmt.Printf("Signatures matched: %d (%.1f%%)\n", matchedPackets,
+		float64(matchedPackets)/float64(tcpSynCount)*100)
+	fmt.Printf("  Exact matches: %d\n", exactMatches)
+	fmt.Printf("  Fuzzy matches: %d\n", fuzzyMatches)
+
+	if len(quirksStats) > 0 {
+		fmt.Printf("\nQuirks detected across all packets:\n")
+		for quirk, count := range quirksStats {
+			fmt.Printf("  %s: %d packets\n", quirk, count)
+		}
+	}
+
+	fmt.Println()
 }
 
-// Helper function to format TCP options for display
-func formatTCPOptions(options []string) string {
-	return strings.Join(options, ", ")
+// ClassicTCPSignature represents a TCP signature for classic p0f matching
+type ClassicTCPSignature struct {
+	IPVersion    int
+	TTL          int
+	IPOptLen     int
+	MSS          int
+	WindowSize   int
+	WindowType   int // WIN_TYPE_NORMAL, WIN_TYPE_MOD, WIN_TYPE_MSS, WIN_TYPE_MTU
+	WindowScale  int
+	TCPOptions   []int  // TCP option codes
+	Quirks       int    // Quirks bitmask
+	PayloadClass int    // 0 = no payload, 1 = has payload
+	OptHash      uint32 // Hash of TCP options
+}
+
+// ClassicMatchResult represents the result of classic TCP matching
+type ClassicMatchResult struct {
+	Signature   P0fSignature
+	Fuzzy       bool
+	Generic     bool
+	TTLDistance int
+	BadTTL      bool
+}
+
+// convertPacketToClassicSignature converts a packet to classic signature format
+func convertPacketToClassicSignature(packet gopacket.Packet, tcpSyn *p0f.TCPSyn) *ClassicTCPSignature {
+	sig := &ClassicTCPSignature{
+		IPVersion:    4, // Default to IPv4
+		TTL:          extractTTL(packet),
+		IPOptLen:     0, // Simplified - would need IP option parsing
+		MSS:          int(tcpSyn.MSS),
+		WindowSize:   extractWindowSize(packet),
+		WindowType:   1, // WIN_TYPE_NORMAL
+		WindowScale:  int(tcpSyn.WScale),
+		TCPOptions:   extractTCPOptionCodes(packet),
+		Quirks:       tcpSyn.Quirks,
+		PayloadClass: extractPayloadClass(packet),
+	}
+
+	// Calculate option hash (simplified version)
+	sig.OptHash = calculateOptionHash(sig.TCPOptions)
+
+	return sig
+}
+
+// classicTCPMatch implements the core p0f TCP matching algorithm from fp_tcp.c
+func classicTCPMatch(packetSig *ClassicTCPSignature, signatures []P0fSignature) *ClassicMatchResult {
+	var exactMatch, genericMatch, fuzzyMatch *ClassicMatchResult
+
+	// Calculate window multiplier for advanced window matching
+	windowMultiplier := detectWindowMultiplier(packetSig)
+
+	for _, sig := range signatures {
+		// Parse the p0f signature
+		parsed := parseP0fSignatureForMatching(sig.Sig)
+		if parsed == nil {
+			continue
+		}
+
+		fuzzy := false
+
+		// Skip option hash check - it's too simplistic and causes false negatives
+
+		// Quirks matching with fuzzy tolerance
+		if !matchQuirks(parsed.Quirks, packetSig.Quirks, &fuzzy) {
+			continue
+		}
+
+		// Fixed parameters matching
+		if parsed.IPOptLen != -1 && parsed.IPOptLen != packetSig.IPOptLen {
+			continue
+		}
+
+		// TTL matching with distance calculation
+		ttlDistance := calculateTTLDistance(parsed.TTL, packetSig.TTL)
+		if ttlDistance > 32 { // MAX_DIST in original p0f
+			fuzzy = true
+		}
+
+		// MSS matching (wildcard support)
+		if parsed.MSS != -1 && parsed.MSS != packetSig.MSS {
+			continue
+		}
+
+		// Window scale matching
+		if parsed.WindowScale != -1 && parsed.WindowScale != packetSig.WindowScale {
+			continue
+		}
+
+		// Payload class matching
+		if parsed.PayloadClass != -1 && parsed.PayloadClass != packetSig.PayloadClass {
+			continue
+		}
+
+		// Window size matching (most complex part)
+		if !matchWindowSize(parsed, packetSig, windowMultiplier) {
+			continue
+		}
+
+		// We have a match! Store by priority: exact > generic > fuzzy
+		result := &ClassicMatchResult{
+			Signature:   sig,
+			Fuzzy:       fuzzy,
+			TTLDistance: ttlDistance,
+		}
+
+		if !fuzzy {
+			if !isGenericSignature(sig.Label) {
+				// Exact match - highest priority, store and continue looking for better
+				if exactMatch == nil || ttlDistance < exactMatch.TTLDistance {
+					exactMatch = result
+				}
+			} else {
+				// Generic match - medium priority
+				if genericMatch == nil || ttlDistance < genericMatch.TTLDistance {
+					genericMatch = result
+					genericMatch.Generic = true
+				}
+			}
+		} else {
+			// Fuzzy match - lowest priority
+			if fuzzyMatch == nil || ttlDistance < fuzzyMatch.TTLDistance {
+				fuzzyMatch = result
+			}
+		}
+	}
+
+	// Return best match found in priority order
+	if exactMatch != nil {
+		return exactMatch
+	}
+	if genericMatch != nil {
+		return genericMatch
+	}
+	if fuzzyMatch != nil {
+		return fuzzyMatch
+	}
+
+	return nil
+}
+
+// Helper function to match quirks with fuzzy tolerance
+func matchQuirks(sigQuirks, packetQuirks int, fuzzy *bool) bool {
+	if sigQuirks == packetQuirks {
+		return true
+	}
+
+	// Calculate quirk differences
+	deleted := (sigQuirks ^ packetQuirks) & sigQuirks
+	added := (sigQuirks ^ packetQuirks) & packetQuirks
+
+	// Allow fuzzy matching for certain quirk changes (from original p0f logic)
+	// DF or ID+ disappearing, or ID- or ECN appearing
+	allowedDeleted := p0f.TCPQuirkDF | p0f.TCPQuirkNZID
+	allowedAdded := p0f.TCPQuirkZeroID | p0f.TCPQuirkECN
+
+	if (deleted & ^allowedDeleted) != 0 || (added & ^allowedAdded) != 0 {
+		return false
+	}
+
+	*fuzzy = true
+	return true
+}
+
+// Helper function to calculate TTL distance
+func calculateTTLDistance(sigTTL, packetTTL int) int {
+	if sigTTL == -1 {
+		// Wildcard TTL matches any packet TTL with distance 0
+		return 0
+	}
+	// Calculate absolute distance
+	if sigTTL >= packetTTL {
+		return sigTTL - packetTTL
+	}
+	return packetTTL - sigTTL
+}
+
+// Helper function to detect window multiplier (simplified version of original)
+func detectWindowMultiplier(sig *ClassicTCPSignature) int {
+	if sig.WindowSize == 0 || sig.MSS < 100 {
+		return -1
+	}
+
+	// Check if window is multiple of MSS
+	if sig.WindowSize%sig.MSS == 0 {
+		return sig.WindowSize / sig.MSS
+	}
+
+	// Check common MTU values
+	commonMTUs := []int{1500, 1460, 1440}
+	for _, mtu := range commonMTUs {
+		if sig.WindowSize%mtu == 0 {
+			return sig.WindowSize / mtu
+		}
+	}
+
+	return -1
+}
+
+// Helper function to match window size (simplified)
+func matchWindowSize(parsed *ParsedClassicSignature, packet *ClassicTCPSignature, windowMulti int) bool {
+	switch parsed.WindowType {
+	case 1: // WIN_TYPE_NORMAL
+		return parsed.WindowSize == packet.WindowSize
+	case 2: // WIN_TYPE_MOD
+		return packet.WindowSize%parsed.WindowSize == 0
+	case 3: // WIN_TYPE_MSS
+		return windowMulti > 0 && parsed.WindowSize == windowMulti
+	case 4: // WIN_TYPE_MTU
+		return windowMulti > 0 && parsed.WindowSize == windowMulti
+	default: // WIN_TYPE_ANY
+		return true
+	}
+}
+
+// ParsedClassicSignature represents a parsed p0f signature for matching
+type ParsedClassicSignature struct {
+	IPVersion    int
+	TTL          int
+	IPOptLen     int
+	MSS          int
+	WindowSize   int
+	WindowType   int
+	WindowScale  int
+	Quirks       int
+	PayloadClass int
+	OptHash      uint32
+}
+
+// Helper function to parse p0f signature for matching (based on original p0f tcp_register_sig)
+func parseP0fSignatureForMatching(sig string) *ParsedClassicSignature {
+	parts := strings.Split(sig, ":")
+	if len(parts) != 8 {
+		return nil // Invalid signature format
+	}
+
+	parsed := &ParsedClassicSignature{}
+
+	// Parse IP version
+	switch parts[0] {
+	case "4":
+		parsed.IPVersion = 4
+	case "6":
+		parsed.IPVersion = 6
+	case "*":
+		parsed.IPVersion = -1
+	default:
+		return nil
+	}
+
+	// Parse TTL
+	ttlStr := parts[1]
+	if strings.Contains(ttlStr, "+") {
+		// Handle TTL+distance format
+		ttlParts := strings.Split(ttlStr, "+")
+		if len(ttlParts) == 2 {
+			if ttl, err := strconv.Atoi(ttlParts[0]); err == nil {
+				if dist, err := strconv.Atoi(ttlParts[1]); err == nil {
+					parsed.TTL = ttl + dist
+				}
+			}
+		}
+	} else if strings.HasSuffix(ttlStr, "-") {
+		// Handle bad TTL format
+		if ttl, err := strconv.Atoi(strings.TrimSuffix(ttlStr, "-")); err == nil {
+			parsed.TTL = ttl
+		}
+	} else if ttl, err := strconv.Atoi(ttlStr); err == nil {
+		parsed.TTL = ttl
+	} else {
+		parsed.TTL = -1 // Any
+	}
+
+	// Parse IP option length
+	if parts[2] == "*" {
+		parsed.IPOptLen = -1
+	} else if olen, err := strconv.Atoi(parts[2]); err == nil {
+		parsed.IPOptLen = olen
+	}
+
+	// Parse MSS
+	if parts[3] == "*" {
+		parsed.MSS = -1
+	} else if mss, err := strconv.Atoi(parts[3]); err == nil {
+		parsed.MSS = mss
+	}
+
+	// Parse window info (parts[4])
+	winParts := strings.Split(parts[4], ",")
+	if len(winParts) >= 1 {
+		winStr := winParts[0]
+
+		if winStr == "*" {
+			parsed.WindowType = 0 // WIN_TYPE_ANY
+			parsed.WindowSize = 0
+		} else if strings.HasPrefix(winStr, "%") {
+			parsed.WindowType = 2 // WIN_TYPE_MOD
+			if ws, err := strconv.Atoi(winStr[1:]); err == nil {
+				parsed.WindowSize = ws
+			}
+		} else if strings.HasPrefix(winStr, "mss*") {
+			parsed.WindowType = 3 // WIN_TYPE_MSS
+			if ws, err := strconv.Atoi(winStr[4:]); err == nil {
+				parsed.WindowSize = ws
+			}
+		} else if strings.HasPrefix(winStr, "mtu*") {
+			parsed.WindowType = 4 // WIN_TYPE_MTU
+			if ws, err := strconv.Atoi(winStr[4:]); err == nil {
+				parsed.WindowSize = ws
+			}
+		} else {
+			parsed.WindowType = 1 // WIN_TYPE_NORMAL
+			if ws, err := strconv.Atoi(winStr); err == nil {
+				parsed.WindowSize = ws
+			}
+		}
+	}
+
+	// Parse window scale
+	if len(winParts) >= 2 {
+		if winParts[1] == "*" {
+			parsed.WindowScale = -1
+		} else if ws, err := strconv.Atoi(winParts[1]); err == nil {
+			parsed.WindowScale = ws
+		}
+	} else {
+		parsed.WindowScale = -1
+	}
+
+	// Parse TCP options (parts[5])
+	optNames := strings.Split(parts[5], ",")
+	var optCodes []int
+	for _, optName := range optNames {
+		switch optName {
+		case "eol":
+			optCodes = append(optCodes, 0)
+		case "nop":
+			optCodes = append(optCodes, 1)
+		case "mss":
+			optCodes = append(optCodes, 2)
+		case "ws":
+			optCodes = append(optCodes, 3)
+		case "sok":
+			optCodes = append(optCodes, 4)
+		case "sack":
+			optCodes = append(optCodes, 5)
+		case "ts":
+			optCodes = append(optCodes, 8)
+		default:
+			// Handle unknown options with "?N" format
+			if strings.HasPrefix(optName, "?") {
+				if code, err := strconv.Atoi(optName[1:]); err == nil {
+					optCodes = append(optCodes, code)
+				}
+			}
+		}
+	}
+	parsed.OptHash = calculateOptionHash(optCodes)
+
+	// Parse quirks (parts[6])
+	parsed.Quirks = 0
+	if parts[6] != "" {
+		quirkNames := strings.Split(parts[6], ",")
+		for _, quirkName := range quirkNames {
+			switch quirkName {
+			case "df":
+				parsed.Quirks |= p0f.TCPQuirkDF
+			case "id+":
+				parsed.Quirks |= p0f.TCPQuirkNZID
+			case "id-":
+				parsed.Quirks |= p0f.TCPQuirkZeroID
+			case "ecn":
+				parsed.Quirks |= p0f.TCPQuirkECN
+			case "0+":
+				parsed.Quirks |= 16 // QUIRK_NZ_MBZ
+			case "flow":
+				parsed.Quirks |= 32 // QUIRK_FLOW
+			case "seq-":
+				parsed.Quirks |= 64 // QUIRK_ZERO_SEQ
+			case "ack+":
+				parsed.Quirks |= 128 // QUIRK_NZ_ACK
+			case "ack-":
+				parsed.Quirks |= 256 // QUIRK_ZERO_ACK
+			case "uptr+":
+				parsed.Quirks |= 512 // QUIRK_NZ_URG
+			case "urgf+":
+				parsed.Quirks |= 1024 // QUIRK_URG
+			case "pushf+":
+				parsed.Quirks |= p0f.TCPQuirkPUSH
+			case "ts1-":
+				parsed.Quirks |= 4096 // QUIRK_OPT_ZERO_TS1
+			case "ts2+":
+				parsed.Quirks |= 8192 // QUIRK_OPT_NZ_TS2
+			case "opt+":
+				parsed.Quirks |= 16384 // QUIRK_OPT_EOL_NZ
+			case "exws":
+				parsed.Quirks |= 32768 // QUIRK_OPT_EXWS
+			case "bad":
+				parsed.Quirks |= 65536 // QUIRK_OPT_BAD
+			}
+		}
+	}
+
+	// Parse payload class (parts[7])
+	switch parts[7] {
+	case "*":
+		parsed.PayloadClass = -1
+	case "0":
+		parsed.PayloadClass = 0
+	case "+":
+		parsed.PayloadClass = 1
+	default:
+		parsed.PayloadClass = -1
+	}
+
+	return parsed
+}
+
+// Helper functions for packet analysis
+func extractWindowSize(packet gopacket.Packet) int {
+	if tcpLayer := packet.Layer(layers.LayerTypeTCP); tcpLayer != nil {
+		tcp := tcpLayer.(*layers.TCP)
+		return int(tcp.Window)
+	}
+	return 0
+}
+
+func extractTCPOptionCodes(packet gopacket.Packet) []int {
+	var codes []int
+	if tcpLayer := packet.Layer(layers.LayerTypeTCP); tcpLayer != nil {
+		tcp := tcpLayer.(*layers.TCP)
+		for _, opt := range tcp.Options {
+			codes = append(codes, int(opt.OptionType))
+		}
+	}
+	return codes
+}
+
+func extractPayloadClass(packet gopacket.Packet) int {
+	if tcpLayer := packet.Layer(layers.LayerTypeTCP); tcpLayer != nil {
+		tcp := tcpLayer.(*layers.TCP)
+		if len(tcp.Payload) > 0 {
+			return 1
+		}
+	}
+	return 0
+}
+
+func calculateOptionHash(options []int) uint32 {
+	// Simplified hash calculation
+	hash := uint32(0)
+	for i, opt := range options {
+		hash ^= uint32(opt) << (uint32(i) % 8)
+	}
+	return hash
+}
+
+func isGenericSignature(label string) bool {
+	return strings.HasPrefix(label, "g:")
+}
+
+func getMatchTypeString(result *ClassicMatchResult) string {
+	if result.Generic {
+		return "Generic"
+	} else if result.Fuzzy {
+		return "Fuzzy"
+	}
+	return "Exact"
 }
