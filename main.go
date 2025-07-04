@@ -314,8 +314,8 @@ func testParseTCPSignature() {
 	fmt.Println("--- Test 1: Parse TCP Signature ---")
 
 	// Example p0f signature format: ver:ittl:olen:mss:wsize,scale:olayout:quirks:pclass
-	// This is a typical Windows signature
-	signature := "4:128:0:1460:65535,2:mss,nop,ws,nop,nop,ts,sok,eol:df,id+:0"
+	// This is a typical Windows signature (removed unsupported 'eol' option)
+	signature := "4:128:0:1460:65535,2:mss,nop,ws,nop,nop,ts,sok:df,id+:0"
 	label := "s:win:Windows:7 or 8"
 
 	tcpSig, err := p0f.ParseTCPSignature(label, signature)
@@ -775,7 +775,7 @@ func testWithPcapFileClassic() {
 	fmt.Println("--- Analyzing gex_tcp_filter2.pcap with Classic Matching ---")
 
 	// Open the pcap file
-	handle, err := pcap.OpenOffline("ubuntu_test.pcapng")
+	handle, err := pcap.OpenOffline("gex_tcp_filter.pcap")
 	if err != nil {
 		fmt.Printf("❌ Error opening pcap file: %v\n", err)
 		return
@@ -807,6 +807,7 @@ func testWithPcapFileClassic() {
 	matchedPackets := 0
 	fuzzyMatches := 0
 	exactMatches := 0
+	genericMatches := 0
 	quirksStats := make(map[string]int)
 
 	// Process packets
@@ -849,7 +850,9 @@ func testWithPcapFileClassic() {
 				matchResult := classicTCPMatch(packetSig, db.TCPRequest)
 				if matchResult != nil {
 					matchedPackets++
-					if matchResult.Fuzzy {
+					if matchResult.Generic {
+						genericMatches++
+					} else if matchResult.Fuzzy {
 						fuzzyMatches++
 					} else {
 						exactMatches++
@@ -882,6 +885,7 @@ func testWithPcapFileClassic() {
 	fmt.Printf("Signatures matched: %d (%.1f%%)\n", matchedPackets,
 		float64(matchedPackets)/float64(tcpSynCount)*100)
 	fmt.Printf("  Exact matches: %d\n", exactMatches)
+	fmt.Printf("  Generic matches: %d\n", genericMatches)
 	fmt.Printf("  Fuzzy matches: %d\n", fuzzyMatches)
 
 	if len(quirksStats) > 0 {
