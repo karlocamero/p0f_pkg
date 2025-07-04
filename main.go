@@ -866,11 +866,11 @@ func testWithPcapFileClassic() {
 					fmt.Printf("  ❌ No classic signature matches found\n")
 				}
 
-				// Limit output for readability
-				if tcpSynCount >= 10 {
-					fmt.Printf("\n... (limiting output to first 10 SYN packets)\n")
-					break
-				}
+				// // Limit output for readability
+				// if tcpSynCount >= 10 {
+				// 	fmt.Printf("\n... (limiting output to first 10 SYN packets)\n")
+				// 	break
+				// }
 			}
 		}
 	}
